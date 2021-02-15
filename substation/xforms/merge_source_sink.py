@@ -1,9 +1,9 @@
-from dace.transformation import pattern_matching
+from dace.transformation import transformation as xf
 from dace import nodes, registry, SDFGState
 
 
 @registry.autoregister_params(singlestate=True, strict=True)
-class MergeSourceSinkArrays(pattern_matching.Transformation):
+class MergeSourceSinkArrays(xf.Transformation):
     """ Merge duplicate arrays that are source/sink nodes. """
 
     _array1 = nodes.AccessNode("_")

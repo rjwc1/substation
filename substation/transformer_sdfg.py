@@ -1,3 +1,4 @@
+from dace.dtypes import typeclass
 import dace
 import numpy as np
 import math
@@ -15,6 +16,11 @@ eps = 1e-5
 
 
 @dace.program
+def relu(x):
+    return np.maximum(x, 0)
+
+
+@dace.program
 def gelu(x: dace_dtype[B, SM, N]):
     """Gaussian Error Linear Unit applied to x."""
     out = np.ndarray(x.shape, x.dtype)
@@ -28,31 +34,10 @@ def gelu(x: dace_dtype[B, SM, N]):
 
 
 @dace.program
-def linear(x: dace_dtype[B, SM, N], w: dace_dtype[emb, N]):
-    """Fully-connected layer with weights w applied to x, and optional bias b.
-
-    x is of shape (batch, *).
-    w is of shape (num_inputs, num_outputs).
-
-    """
-    return x @ np.transpose(w)
-
-
-@dace.program
 def linear_with_bias(x: dace_dtype[B, SM, N], w: dace_dtype[emb, N],
                      bias: dace_dtype[emb]):
     """Fully-connected layer with weights w and bias."""
-    out = np.ndarray([B, SM, emb], x.dtype)
-    outb = np.ndarray([B, SM, emb], x.dtype)
-    for i in dace.map[0:B]:
-        out[i] = x[i] @ np.transpose(w[:])
-    for i, j, k in dace.map[0:B, 0:SM, 0:emb]:
-        with dace.tasklet:
-            inp << out[i, j, k]
-            b << bias[k]
-            outp >> outb[i, j, k]
-            outp = inp + b
-    return outb
+    return np.einsum('bik,jk->bij', x, w) + bias
 
 
 @dace.program
@@ -66,13 +51,11 @@ def meanstd(x: dace_dtype[B, SM, N]):
     for i, j in dace.map[0:B, 0:SM]:
         with dace.tasklet:
             fmom << moment[i, j]
-            mn >> mean[i, j]
-            mn = fmom / (SM * B)
-        with dace.tasklet:
-            fmom << moment[i, j]
             smom << second_moment[i, j]
+            mn >> mean[i, j]
             st >> std[i, j]
-            st = (smom - (fmom * fmom)) / (SM * B)
+            mn = fmom / (SM * B)
+            st = math.sqrt((smom / (SM*B)) - mn*mn)
 
     return mean, std
 
@@ -121,45 +104,40 @@ def dropout(x: dace_dtype[B, SM, N], mask: dace_dtype[B, SM, N]):
 
 
 @dace.program
-def softmax(X_in: dace_dtype[H, B, SN, SM]):
-    tmp_max = dace.reduce(lambda a, b: max(a, b), X_in, axis=3)
-    tmp_out = np.ndarray([H, B, SN, SM], dtype=dace_dtype)
-    out = np.ndarray([H, B, SN, SM], dtype=dace_dtype)
-
-    # No broadcasting rules
-    for i, j, k, l in dace.map[0:H, 0:B, 0:SN, 0:SM]:
-        with dace.tasklet:
-            inp << X_in[i, j, k, l]
-            mx << tmp_max[i, j, k]
-            o >> tmp_out[i, j, k, l]
-            o = math.exp(inp - mx)
-    #tmp_out = np.exp(X_in - tmp_max)
-
-    tmp_sum = dace.reduce(lambda a, b: a + b, tmp_out, identity=0, axis=3)
-    for i, j, k, l in dace.map[0:H, 0:B, 0:SN, 0:SM]:
-        with dace.tasklet:
-            inp << tmp_out[i, j, k, l]
-            sm << tmp_sum[i, j, k]
-            o >> out[i, j, k, l]
-            o = inp / sm
-
-    return out
+def softmax(x: dace_dtype[B, H, SM, SN]):
+    tmp_max = np.maximum.reduce(x, axis=-1, keepdims=True, initial=-9999)
+    tmp_out = np.exp(x - tmp_max)
+    tmp_sum = np.add.reduce(tmp_out, axis=-1, keepdims=True, initial=0)
+    return tmp_out / tmp_sum
 
 
 @dace.program
-def mha_forward(q: dace_dtype[B, SN, N], k: dace_dtype[B, SM, N],
-                v: dace_dtype[B, SM, N], wq: dace_dtype[P, H, N],
-                wk: dace_dtype[P, H, N], wv: dace_dtype[P, H, N],
-                wo: dace_dtype[P, H, N], scaler: dace_dtype):
-    qq = np.einsum("phi,bji->phbj", wq, q)
-    kk = np.einsum("phi,bki->phbk", wk, k)
-    vv = np.einsum("phi,bki->phbk", wv, v)
+def mha_forward(
+    q: dace_dtype[B, SN, N],
+    k: dace_dtype[B, SM, N],
+    v: dace_dtype[B, SM, N],
+    wq: dace_dtype[P, H, N],
+    wk: dace_dtype[P, H, N],
+    wv: dace_dtype[P, H, N],
+    wo: dace_dtype[P, H, N],
+    bq: dace_dtype[P, H, 1, 1],
+    bk: dace_dtype[P, H, 1, 1],
+    bv: dace_dtype[P, H, 1, 1],
+    bo: dace_dtype[N],
+    scaler: dace_dtype,
+):
+    qq = np.einsum("phi,bji->phbj", wq, q) + bq
+    kk = np.einsum("phi,bki->phbk", wk, k) + bk
+    vv = np.einsum("phi,bki->phbk", wv, v) + bv
     beta = scaler * np.einsum("phbk,phbj->hbjk", kk, qq)
     alpha = softmax(beta)
     gamma = np.einsum("phbk,hbjk->phbj", vv, alpha)
-    out = np.einsum("phi,phbj->bji", wo, gamma)
+    out = np.einsum("phi,phbj->bji", wo, gamma) + bo
     return out
 
+
+activation = relu
+# activation = gelu
 
 
 @dace.program
@@ -168,53 +146,33 @@ def encoder(x: dace_dtype[B, SM,
                                                   N], attn_wk: dace_dtype[P, H,
                                                                           N],
             attn_wv: dace_dtype[P, H, N], attn_wo: dace_dtype[P, H, N],
+            attn_bq: dace_dtype[P, H, 1, 1], attn_bk: dace_dtype[P, H, 1, 1],
+            attn_bv: dace_dtype[P, H, 1, 1], attn_bo: dace_dtype[N],
             attn_scale: dace_dtype, norm1_scale: dace_dtype[N],
             norm1_bias: dace_dtype[N], norm2_scale: dace_dtype[N],
             norm2_bias: dace_dtype[N], linear1_w: dace_dtype[emb, N],
             linear1_b: dace_dtype[emb], linear2_w: dace_dtype[N, emb],
             linear2_b: dace_dtype[N], attn_dropout: dace_dtype[B, SM, N],
             linear1_dropout: dace_dtype[B, SM,
-                                        emb], ff_dropout: dace_dtype[B, SM,
-                                                                     N]):
+                                        emb], ff_dropout: dace_dtype[B, SM, N]):
 
     # Self-attention.
-    # attn = np.ndarray(x.shape, x.dtype)
-    # attn_forward(Q=x,
-    #              K=x,
-    #              V=x,
-    #              WQ=attn_wq,
-    #              WK=attn_wk,
-    #              WV=attn_wv,
-    #              WO=attn_wo,
-    #              scaler=attn_scale,
-    #              OUT=attn,
-    #              B=B,
-    #              H=H,
-    #              N=N,
-    #              P=P,
-    #              SM=SM,
-    #              SN=SM)
-    attn = mha_forward(x, x, x, attn_wq, attn_wk, attn_wv, attn_wo, attn_scale)
+    attn = mha_forward(x, x, x, attn_wq, attn_wk, attn_wv, attn_wo, attn_bq,
+                       attn_bk, attn_bv, attn_bo, attn_scale)
 
     # Residual connection.
-    attn_resid = dropout(attn, attn_dropout) + x  # B x SM x N
+    attn_resid = dropout(attn, attn_dropout) + x
 
-    normed1 = layer_norm_scaled(attn_resid, norm1_scale,
-                                norm1_bias)  # B x SM x N
+    normed1 = layer_norm_scaled(attn_resid, norm1_scale, norm1_bias)
 
     # Feedforward network.
     ff = linear_with_bias(
-        dropout(
-            gelu(linear_with_bias(normed1, linear1_w,
-                                  linear1_b)),  # B x SM x emb
-            linear1_dropout),
-        linear2_w,
-        linear2_b)  # B x SM x N
+        dropout(activation(linear_with_bias(normed1, linear1_w, linear1_b)),
+                linear1_dropout), linear2_w, linear2_b)
 
     # Residual connection.
-    ff_resid = dropout(ff, ff_dropout) + normed1  # B x SM x N
-    normed2 = layer_norm_scaled(ff_resid, norm2_scale,
-                                norm2_bias)  # B x SM x N
+    ff_resid = dropout(ff, ff_dropout) + normed1
+    normed2 = layer_norm_scaled(ff_resid, norm2_scale, norm2_bias)
     return normed2
 
 
@@ -228,8 +186,7 @@ def decoder(x: dace_dtype[B, SM, N], attn_wq: dace_dtype[P, H, N],
             linear1_b: dace_dtype[emb], linear2_w: dace_dtype[N, emb],
             linear2_b: dace_dtype[N], attn_dropout: dace_dtype[B, SM, N],
             linear1_dropout: dace_dtype[B, SM,
-                                        emb], ff_dropout: dace_dtype[B, SM,
-                                                                     N]):
+                                        emb], ff_dropout: dace_dtype[B, SM, N]):
     # Masked self-attention.
     attn = np.ndarray(x.shape, x.dtype)
     attn_forward_mask(Q=x,
@@ -333,59 +290,121 @@ def dec_with_enc_attn(
 
 
 if __name__ == '__main__':
-    # B = 2
-    # H = 16
-    # P = 64
-    # N = P * H
-    # SM, SN = 512, 512
-    # hidden = 4 * N
+    B = 1  #2
+    H = 8  #16
+    P = 16  #64
+    N = P * H
+    SM, SN = 32, 32  #512, 512
+    emb = 4 * N
+    sizes = dict(B=B, H=H, P=P, N=N, SM=SM, emb=emb)
     from dace.transformation.dataflow import MapFusion
     from dace.transformation.interstate import StateFusion
 
-    # dace.Config.set('optimizer',
-    #                 'automatic_strict_transformations',
-    #                 value=False)
-    # dace.Config.set('optimizer',
-    #                 'automatic_strict_transformation',
-    #                 value=False)
+    # softmax.to_sdfg().save('softmax.sdfg')
 
-    sdfg = mha_forward.to_sdfg()
-    #sdfg.apply_transformations_repeated([StateFusion])
-    sdfg.save('mha3.sdfg')
+    # sdfg = mha_forward.to_sdfg()
+    # #sdfg.apply_transformations_repeated([StateFusion])
+    # sdfg.save('mha3.sdfg')
+
+    from typing import Set
+
+    def find_new_name(sdfg: dace.SDFG, name: str) -> str:
+        """ Tries to find a new name by adding an underscore and a number. """
+        index = 0
+        taken = set(sdfg.arrays.keys() | sdfg.symbols.keys()
+                    | sdfg.constants.keys())
+        while (name + ('_%d' % index)) in taken:
+            index += 1
+
+        return name + ('_%d' % index)
+
+    def unify_symbols(sdfg: dace.SDFG):
+        """ Uses one set of symbols across all nested SDFGs. """
+        for state in sdfg.nodes():
+            for node in state.nodes():
+                if isinstance(node, dace.nodes.NestedSDFG):
+                    # First, get nested symbols and replace them if they match
+                    # the names of the outer symbols
+                    usedsyms: Set[str] = set()
+                    for symvalue in node.symbol_mapping.values():
+                        usedsyms |= set(
+                            map(
+                                str,
+                                dace.symbolic.pystr_to_symbolic(
+                                    symvalue).free_symbols))
+
+                    # Replace clashing names
+                    clashing = usedsyms & (node.sdfg.symbols.keys()
+                                           | node.sdfg.arrays.keys())
+                    for clash in clashing:
+                        new_name = find_new_name(node.sdfg, clash)
+                        node.sdfg.replace(clash, new_name)
+                        if clash in node.symbol_mapping:
+                            node.symbol_mapping[new_name] = node.symbol_mapping[
+                                clash]
+                            del node.symbol_mapping[clash]
+
+                    # Two-step replacement (N -> __dacesym_N --> map[N]) to avoid clashes
+                    for symname, symvalue in node.symbol_mapping.items():
+                        if str(symname) != str(symvalue):
+                            node.sdfg.replace(symname, '__dacesym_' + symname)
+                    for symname, symvalue in node.symbol_mapping.items():
+                        if str(symname) != str(symvalue):
+                            if str(symvalue) in node.sdfg.symbols:
+                                del node.sdfg.symbols[str(symvalue)]
+                            node.sdfg.replace('__dacesym_' + symname,
+                                              str(symvalue))
+
+                    # Replace symbol mapping
+                    node.symbol_mapping = {k: k for k in usedsyms}
+
+                    # Recursively descend
+                    unify_symbols(node.sdfg)
 
     esdfg = encoder.to_sdfg()  #strict=False)
+    esdfg.save('encoder.sdfg')
+
+    #esdfg = dace.SDFG.from_file('encoder.sdfg')
+    #esdfg.expand_library_nodes()
+    # unify_symbols(esdfg)
+    # esdfg.save('encoder.sdfg')
+
+    # Create sample data
+    def deal_with_one(desc):
+        if isinstance(desc, typeclass):
+            return np.random.rand()
+        shape = [dace.symbolic.evaluate(s, sizes) for s in desc.shape]
+        return np.random.rand(*shape).astype(np.float32)
+
+    arrays = {k: deal_with_one(v) for k, v in encoder.f.__annotations__.items()}
+    esdfg(**arrays, **sizes)
+
+    import torch
+
     #esdfg.apply_transformations_repeated([StateFusion, MergeSourceSinkArrays])
     #esdfg.apply_strict_transformations()
     #esdfg.apply_transformations_repeated(MapFusion)
-    esdfg.save('encoder.sdfg')
 
-    dsdfg = decoder.to_sdfg()
-    dsdfg.apply_strict_transformations()
-    dsdfg.apply_transformations_repeated(MapFusion)
-    dsdfg.save('decoder-nonstrict.sdfg')
+    # dsdfg = decoder.to_sdfg()
+    # dsdfg.apply_strict_transformations()
+    # dsdfg.apply_transformations_repeated(MapFusion)
+    # dsdfg.save('decoder-nonstrict.sdfg')
 
-    desdfg = dec_with_enc_attn.to_sdfg()
-    desdfg.apply_strict_transformations()
-    desdfg.apply_transformations_repeated(MapFusion)
-    desdfg.save('decoder_encattn.sdfg')
+    # desdfg = dec_with_enc_attn.to_sdfg()
+    # desdfg.apply_strict_transformations()
+    # desdfg.apply_transformations_repeated(MapFusion)
+    # desdfg.save('decoder_encattn.sdfg')
 
-    # Remove duplicate CUBLAS creation code. TODO: Use library nodes instead
-    cublas_found = False
-    for node, parent in desdfg.all_nodes_recursive():
-        if isinstance(node, dace.nodes.Tasklet):
-            if 'cublasHandle_t' in node.code_global:
-                if cublas_found:
-                    node.code_global = ''
-                    node.code_init = ''
-                    node.code_exit = ''
-                cublas_found = True
+    # # Remove duplicate CUBLAS creation code. TODO: Use library nodes instead
+    # cublas_found = False
+    # for node, parent in desdfg.all_nodes_recursive():
+    #     if isinstance(node, dace.nodes.Tasklet):
+    #         if 'cublasHandle_t' in node.code_global:
+    #             if cublas_found:
+    #                 node.code_global = ''
+    #                 node.code_init = ''
+    #                 node.code_exit = ''
+    #             cublas_found = True
 
-    # For compilation, ensure we link with cublas
-    if os.name == 'nt':
-        dace.Config.append('compiler', 'cpu', 'libs', value='cublas.lib')
-    else:
-        dace.Config.append('compiler', 'cpu', 'libs', value='libcublas.so')
-
-    esdfg.compile(optimizer=False)
-    dsdfg.compile(optimizer=False)
-    desdfg.compile(optimizer=False)
+    # dsdfg.compile(optimizer=False)
+    # desdfg.compile(optimizer=False)

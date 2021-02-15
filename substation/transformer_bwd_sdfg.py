@@ -257,7 +257,7 @@ def encoder_backward(
         DWV=dattn_wv,
         DWO=dattn_wo,
         # DK=dk_unused, DV=dv_unused, WK=attn_wk, WV=attn_wv,
-        B=B,
+        #B=B,
         SM=SM,
         SN=SM,
         H=H,
