@@ -54,8 +54,8 @@ def meanstd(x: dace_dtype[B, SM, N]):
             smom << second_moment[i, j]
             mn >> mean[i, j]
             st >> std[i, j]
-            mn = fmom / (SM * B)
-            st = math.sqrt((smom / (SM*B)) - mn*mn)
+            mn = fmom / N
+            st = math.sqrt((smom / N) - mn*mn)
 
     return mean, std
 
