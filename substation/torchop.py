@@ -115,24 +115,39 @@ if __name__ == '__main__':
     P = 64
     N = P * H
     SM, SN = 512, 512
-    K, Q, V = (
-        torch.randn([SM, B, N], requires_grad=True),  #.cuda(),
-        torch.randn([SN, B, N], requires_grad=True),  #.cuda(),
-        torch.randn([SM, B, N], requires_grad=True))  #.cuda())
+    K, Q, V = (torch.randn([SM, B, N], requires_grad=True),
+               torch.randn([SN, B, N], requires_grad=True),
+               torch.randn([SM, B, N], requires_grad=True))
 
     # Testing self-attention
     # K = Q = V
 
+    # GPU
+    # Q = Q.cuda()
+    # K = K.cuda()
+    # V = V.cuda()
+    # import dace.libraries.blas as blas
+    # import dace.data
+    # blas.default_implementation = 'cuBLAS'
+    # sdfg = mha_forward.to_sdfg()
+    # # Notify DaCe that all input/output arrays are allocated on the GPU
+    # for arr in sdfg.arrays.values():
+    #     if not arr.transient and isinstance(arr, dace.data.Array):
+    #         arr.storage = dace.StorageType.GPU_Global
+    # sdfg.apply_gpu_transformations()
+    # csdfg = sdfg.compile()
+    # csdfg = dace.sdfg.load_precompiled_sdfg('.dacecache/mha_forward')
+
+
+    # CPU
     import dace.libraries.blas as blas
     blas.default_implementation = 'MKL'
-    #from substation.attention import create_attn_forward_and_compile
-    csdfg = mha_forward.compile(
-    )  #create_attn_forward_and_compile(copy_to_device=False)
+    csdfg = mha_forward.compile()
 
-    op = DaceMHA(N, P, H, csdfg, None)  #.cuda()
+    op = DaceMHA(N, P, H, csdfg, None)#.cuda()
     res_dace = op.forward(Q, K, V)
 
-    attn = torch.nn.MultiheadAttention(N, H, bias=True)  #.cuda()
+    attn = torch.nn.MultiheadAttention(N, H, bias=True)#.cuda()
     attn.in_proj_weight.data = torch.cat(
         (op.WQ.transpose(0, 1).reshape(N, N), op.WK.transpose(0, 1).reshape(
             N, N), op.WV.transpose(0, 1).reshape(N, N)),

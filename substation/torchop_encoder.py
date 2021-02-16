@@ -154,10 +154,24 @@ if __name__ == '__main__':
     P = 64
     N = P * H
     SM, SN = 512, 512
-    X = torch.randn([SM, B, N], requires_grad=True)  #.cuda()
+    X = torch.randn([SM, B, N], requires_grad=True)
 
     import dace.libraries.blas as blas
-    blas.default_implementation = 'MKL'  # 'cuBLAS'
+
+    # GPU
+    # import dace.data
+    # blas.default_implementation = 'cuBLAS'
+    # sdfg = encoder.to_sdfg()
+    # # Notify DaCe that all input/output arrays are allocated on the GPU
+    # for arr in sdfg.arrays.values():
+    #     if not arr.transient and isinstance(arr, dace.data.Array):
+    #         arr.storage = dace.StorageType.GPU_Global
+    # sdfg.apply_gpu_transformations()
+    # sdfg.apply_strict_transformations()
+    # csdfg = sdfg.compile()
+
+    # CPU
+    blas.default_implementation = 'MKL'
     csdfg = encoder.compile()
 
     op = DaceEncoder(N, P, H, csdfg, None)  #.cuda()
@@ -175,8 +189,8 @@ if __name__ == '__main__':
     t_encoder.self_attn.in_proj_bias.data = torch.cat(
         (op.BQ.transpose(0, 1).reshape(N), op.BK.transpose(0, 1).reshape(N),
          op.BV.transpose(0, 1).reshape(N)))
-    t_encoder.self_attn.out_proj.weight.data = op.WO.transpose(0,
-                                                               2).reshape(N, N)
+    t_encoder.self_attn.out_proj.weight.data = op.WO.transpose(0, 2).reshape(
+        N, N)
     t_encoder.self_attn.out_proj.bias.data = op.BO
     t_encoder.linear1.weight.data = op.linear1_w
     t_encoder.linear1.bias.data = op.linear1_b
@@ -189,7 +203,7 @@ if __name__ == '__main__':
     t_encoder.train()
     res_torch = t_encoder.forward(X)
 
-    result = torch.allclose(res_dace, res_torch, rtol=1e-04, atol=1e-04)
+    result = torch.allclose(res_dace, res_torch, rtol=1e-03, atol=1e-05)
     print('Result:', result)
     if not result:
         exit(1)
