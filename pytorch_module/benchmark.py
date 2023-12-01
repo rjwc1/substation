@@ -26,7 +26,7 @@ else:
     nvcc_gencode = '-gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70'
     check_correctness = True
     work_from_tmp = False
-    output_to_file = False
+    output_to_file = True
 
 
 def list_dependencies():
@@ -154,7 +154,7 @@ def get_gpu_helper():
 
 
 def unload_lib(lib):
-    cdll = ctypes.CDLL("libdl.so")
+    cdll = ctypes.CDLL("libdl.so.2")
     cdll.dlclose.restype = ctypes.c_int
     cdll.dlclose.argtypes = [ctypes.c_void_p]
     res = cdll.dlclose(lib._handle)
