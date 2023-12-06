@@ -1,10 +1,12 @@
 #!/bin/bash
 export PYTHONPATH=$(pwd)
-pip3 install transformers tabulate
-cp -f ./dtypes.py ./dace/dace/dtypes.py
-cd ./dace
-python3 ./setup.py build
-python3 ./setup.py install
+pip3 install transformers tabulate dace
+# cp -f ./dtypes.py ./dace/dace/dtypes.py
+# cp -f ./newast.py ./dace/dace/frontend/python/newast.py
+# cd ./dace
+# python3 ./setup.py build
+# python3 ./setup.py install
+# pip install --editable .
 cd ../gpuwait
 python3 ./setup.py build
 python3 ./setup.py install
