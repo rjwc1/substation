@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: pycudaprof
+Version: 0.0.1
+Summary: Python interface to CUDA profiler control
+Author: Nikoli Dryden
+Author-email: ndryden@ndryden.com
+Requires-Python: >=3.6

@@ -7,7 +7,7 @@ pip3 install transformers tabulate dace
 # python3 ./setup.py build
 # python3 ./setup.py install
 # pip install --editable .
-cd ../gpuwait
+cd ./gpuwait
 python3 ./setup.py build
 python3 ./setup.py install
 cd ../pycudaprof
