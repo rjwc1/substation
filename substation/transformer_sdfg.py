@@ -129,6 +129,8 @@ def mha_forward(
     qq = np.einsum("phi,bji->phbj", wq, q) + bq
     kk = np.einsum("phi,bki->phbk", wk, k) + bk
     vv = np.einsum("phi,bki->phbk", wv, v) + bv
+
+    #For linformer, project Q and K before doing this step
     beta = scaler * np.einsum("phbk,phbj->hbjk", kk, qq)
     alpha = softmax(beta)
     gamma = np.einsum("phbk,hbjk->phbj", vv, alpha)
@@ -362,12 +364,17 @@ if __name__ == '__main__':
                     unify_symbols(node.sdfg)
 
     esdfg = encoder.to_sdfg()  #strict=False)
-    esdfg.save('encoder.sdfg')
 
-    #esdfg = dace.SDFG.from_file('encoder.sdfg')
-    #esdfg.expand_library_nodes()
-    # unify_symbols(esdfg)
+    esdfg.apply_transformations_repeated([StateFusion, MergeSourceSinkArrays])
+    esdfg.apply_strict_transformations()
+    esdfg.apply_transformations_repeated(MapFusion)
+
     # esdfg.save('encoder.sdfg')
+
+    # esdfg = dace.SDFG.from_file('encoder.sdfg')
+    esdfg.expand_library_nodes()
+    unify_symbols(esdfg)
+    esdfg.save('encoder.sdfg')
 
     # Create sample data
     def deal_with_one(desc):
@@ -381,9 +388,9 @@ if __name__ == '__main__':
 
     import torch
 
-    #esdfg.apply_transformations_repeated([StateFusion, MergeSourceSinkArrays])
-    #esdfg.apply_strict_transformations()
-    #esdfg.apply_transformations_repeated(MapFusion)
+    # esdfg.apply_transformations_repeated([StateFusion, MergeSourceSinkArrays])
+    # esdfg.apply_strict_transformations()
+    # esdfg.apply_transformations_repeated(MapFusion)
 
     # dsdfg = decoder.to_sdfg()
     # dsdfg.apply_strict_transformations()

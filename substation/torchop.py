@@ -123,44 +123,44 @@ if __name__ == '__main__':
     # K = Q = V
 
     # GPU
-    # Q = Q.cuda()
-    # K = K.cuda()
-    # V = V.cuda()
-    # import dace.libraries.blas as blas
-    # import dace.data
-    # blas.default_implementation = 'cuBLAS'
-    # sdfg = mha_forward.to_sdfg()
-    # # Notify DaCe that all input/output arrays are allocated on the GPU
-    # for arr in sdfg.arrays.values():
-    #     if not arr.transient and isinstance(arr, dace.data.Array):
-    #         arr.storage = dace.StorageType.GPU_Global
-    # sdfg.apply_gpu_transformations()
-    # csdfg = sdfg.compile()
-    # csdfg = dace.sdfg.load_precompiled_sdfg('.dacecache/mha_forward')
+    Q = Q.cuda()
+    K = K.cuda()
+    V = V.cuda()
+    import dace.libraries.blas as blas
+    import dace.data
+    blas.default_implementation = 'cuBLAS'
+    sdfg = mha_forward.to_sdfg()
+    # Notify DaCe that all input/output arrays are allocated on the GPU
+    for arr in sdfg.arrays.values():
+        if not arr.transient and isinstance(arr, dace.data.Array):
+            arr.storage = dace.StorageType.GPU_Global
+    sdfg.apply_gpu_transformations()
+    csdfg = sdfg.compile()
+    csdfg = dace.sdfg.load_precompiled_sdfg('.dacecache/mha_forward')
 
 
     # CPU
-    import dace.libraries.blas as blas
-    blas.default_implementation = 'MKL'
-    csdfg = mha_forward.compile()
+    # import dace.libraries.blas as blas
+    # blas.default_implementation = 'MKL'
+    # csdfg = mha_forward.compile()
 
-    op = DaceMHA(N, P, H, csdfg, None)#.cuda()
-    res_dace = op.forward(Q, K, V)
+    # op = DaceMHA(N, P, H, csdfg, None)#.cuda()
+    # res_dace = op.forward(Q, K, V)
 
-    attn = torch.nn.MultiheadAttention(N, H, bias=True)#.cuda()
-    attn.in_proj_weight.data = torch.cat(
-        (op.WQ.transpose(0, 1).reshape(N, N), op.WK.transpose(0, 1).reshape(
-            N, N), op.WV.transpose(0, 1).reshape(N, N)),
-        dim=0)
-    attn.out_proj.weight.data = op.WO.transpose(0, 2).reshape(N, N)
-    attn.in_proj_bias.data = torch.cat(
-        (op.BQ.transpose(0, 1).reshape(N), op.BK.transpose(0, 1).reshape(N),
-         op.BV.transpose(0, 1).reshape(N)))
-    attn.out_proj.bias.data = op.BO
-    attn.train()
-    res_torch, _ = attn.forward(Q, K, V, need_weights=False)
+    # attn = torch.nn.MultiheadAttention(N, H, bias=True)#.cuda()
+    # attn.in_proj_weight.data = torch.cat(
+    #     (op.WQ.transpose(0, 1).reshape(N, N), op.WK.transpose(0, 1).reshape(
+    #         N, N), op.WV.transpose(0, 1).reshape(N, N)),
+    #     dim=0)
+    # attn.out_proj.weight.data = op.WO.transpose(0, 2).reshape(N, N)
+    # attn.in_proj_bias.data = torch.cat(
+    #     (op.BQ.transpose(0, 1).reshape(N), op.BK.transpose(0, 1).reshape(N),
+    #      op.BV.transpose(0, 1).reshape(N)))
+    # attn.out_proj.bias.data = op.BO
+    # attn.train()
+    # res_torch, _ = attn.forward(Q, K, V, need_weights=False)
 
-    result = torch.allclose(res_torch, res_dace, rtol=1e-04, atol=1e-06)
-    print('Result:', result)
-    if not result:
-        exit(1)
+    # result = torch.allclose(res_torch, res_dace, rtol=1e-04, atol=1e-06)
+    # print('Result:', result)
+    # if not result:
+    #     exit(1)

@@ -1,6 +1,7 @@
 gpuwait.cpp
 setup.py
 wait_kernel.cu
+dist/gpu_wait-0.0.0-py3.11-linux-x86_64.egg
 gpu_wait.egg-info/PKG-INFO
 gpu_wait.egg-info/SOURCES.txt
 gpu_wait.egg-info/dependency_links.txt

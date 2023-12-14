@@ -1,6 +1,7 @@
 __init__.py
 pycudaprof.py
 setup.py
+dist/pycudaprof-0.0.1-py3.11.egg
 pycudaprof.egg-info/PKG-INFO
 pycudaprof.egg-info/SOURCES.txt
 pycudaprof.egg-info/dependency_links.txt
