@@ -98,49 +98,100 @@ class SequentialSequence(nn.Module):
             x = x + g(x, **g_args)
         return 
 
-class LinformerSelfAttention(nn.Module):
-    def __init__(self, dim, seq_len, k = 256, heads = 8, dim_head = None, one_kv_head = False, share_kv = False, dropout = 0.):
+class MultiheadSelfAttention(nn.Module):
+    def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
         super().__init__()
+
         assert (dim % heads) == 0, 'dimension must be divisible by the number of heads'
 
         self.seq_len = seq_len
-        self.k = k
 
-        self.heads = heads
+        self.heads = heads #Number of heads
 
-        dim_head = default(dim_head, dim // heads)
+        dim_head = dim // heads #Set the dimension of each attention head
         self.dim_head = dim_head
 
-        self.to_q = nn.Linear(dim, dim_head * heads, bias = False)
+        self.to_q = nn.Linear(dim, dim_head * heads, bias = False) #Multiply Q by its weights
 
-        kv_dim = dim_head if one_kv_head else (dim_head * heads)
-        self.to_k = nn.Linear(dim, kv_dim, bias = False)
-        self.proj_k = nn.Parameter(init_(torch.zeros(seq_len, k)))
+        self.to_k = nn.Linear(dim, dim_head * heads, bias = False) #Multiply K by its weights
 
-        self.share_kv = share_kv
+        self.to_v = nn.Linear(dim, dim_head * heads, bias = False) #Multiply V by its weights
+
+        self.dropout = nn.Dropout(dropout) #Dropout layer
+        self.to_out = nn.Linear(dim_head * heads, dim) #Linear layer for output
+    
+    def forward(self, x, context = None, **kwargs):
+        b, n, d, d_h, h = *x.shape, self.dim_head, self.heads
+
+        kv_len = n if context is None else context.shape[1] #Keys and values must be the same length as input
+        assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
+
+        queries = self.to_q(x) #Multiply queries by weights
+
+        kv_input = x if context is None else context #Input keys and values
+
+        keys = self.to_k(kv_input) #Multiply keys by weights
+        values = self.to_v(kv_input) #Multiply values by weights 
+
+        # attention
+
+        #bhnd,bhkd->bhnk
+        dots = torch.einsum('bhnd,bhnd->bhn', queries, keys) * (d_h ** -0.5) #Dot product the queries and keys, normalize by dimension
+        print("Got past this einsum!")
+        attn = dots.softmax(dim=-1) #Compute softmax
+        attn = self.dropout(attn) #Dropout layer
+        #bhnk,bhkd->bhnd
+        out = torch.einsum('bhn,bhn->bhnd', attn, values ) #Multiply result of attention by the values
+
+        # split heads
+        out = out.transpose(1, 2).reshape(b, n, -1)
+        return self.to_out(out)
+
+
+class LinformerSelfAttention(nn.Module):
+    def __init__(self, dim, seq_len, k = 256, heads = 8, one_kv_head = False, share_kv = False, dropout = 0.):
+        super().__init__()
+
+        assert (dim % heads) == 0, 'dimension must be divisible by the number of heads'
+
+        self.seq_len = seq_len
+        self.k = k #The projection dimension, a constant you can set
+
+        self.heads = heads #Number of heads
+
+        dim_head = dim // heads #Set the dimension of each attention head
+        self.dim_head = dim_head
+
+        self.to_q = nn.Linear(dim, dim_head * heads, bias = False) #Multiply Q by its weights
+
+        kv_dim = dim_head if one_kv_head else (dim_head * heads) #Can optimize by sharing parameters across linear projection matrices for each head
+        self.to_k = nn.Linear(dim, kv_dim, bias = False) #Multiply K by its weights
+        self.proj_k = nn.Parameter(init_(torch.zeros(seq_len, k))) #Project k
+
+        self.share_kv = share_kv #Can optimize by sharing the same projection matrix across keys and values
         if not share_kv:
             self.to_v = nn.Linear(dim, kv_dim, bias = False)
             self.proj_v = nn.Parameter(init_(torch.zeros(seq_len, k)))
 
-        self.dropout = nn.Dropout(dropout)
-        self.to_out = nn.Linear(dim_head * heads, dim)
+        self.dropout = nn.Dropout(dropout) #Dropout layer
+        self.to_out = nn.Linear(dim_head * heads, dim) #Linear layer for output
 
     def forward(self, x, context = None, **kwargs):
         b, n, d, d_h, h, k = *x.shape, self.dim_head, self.heads, self.k
 
-        kv_len = n if context is None else context.shape[1]
+        kv_len = n if context is None else context.shape[1] #Keys and values must be the same length as input
         assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
 
-        queries = self.to_q(x)
+        queries = self.to_q(x) #Multiply queries by weights
 
         proj_seq_len = lambda args: torch.einsum('bnd,nk->bkd', *args)
 
-        kv_input = x if context is None else context
+        kv_input = x if context is None else context #Input keys and values
 
-        keys = self.to_k(kv_input)
-        values = self.to_v(kv_input) if not self.share_kv else keys
+        keys = self.to_k(kv_input) #Multiply keys by weights
+        values = self.to_v(kv_input) if not self.share_kv else keys  
 
-        kv_projs = (self.proj_k, self.proj_v if not self.share_kv else self.proj_k)
+        kv_projs = (self.proj_k, self.proj_v if not self.share_kv else self.proj_k) #If stated, share the key and value projections
 
         # project keys and values along the sequence length dimension to k
 
@@ -155,20 +206,40 @@ class LinformerSelfAttention(nn.Module):
 
         # attention
 
-        dots = torch.einsum('bhnd,bhkd->bhnk', queries, keys) * (d_h ** -0.5)
-        attn = dots.softmax(dim=-1)
-        attn = self.dropout(attn)
-        out = torch.einsum('bhnk,bhkd->bhnd', attn, values)
+        dots = torch.einsum('bhnd,bhkd->bhnk', queries, keys) * (d_h ** -0.5) #Dot product the queries and keys, normalize by dimension
+        attn = dots.softmax(dim=-1) #Compute softmax
+        attn = self.dropout(attn) #Dropout layer
+        out = torch.einsum('bhnk,bhkd->bhnd', attn, values ) #Multiply result of attention by the values
 
         # split heads
         out = out.transpose(1, 2).reshape(b, n, -1)
         return self.to_out(out)
 
-class EncoderLayer(nn.Module):
-    def __init__(self, dim, seq_len, k = 256, heads = 8, dim_head = None, dropout = 0.):
+class MHAEncoderLayer(nn.Module):
+    def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
         super().__init__()
         layers = nn.ModuleList([])
-        attn = LinformerSelfAttention(dim, seq_len, k = k, heads = heads, dim_head = dim_head, dropout = dropout)
+        attn = MultiheadSelfAttention(dim=dim, seq_len=seq_len, heads=heads, dropout=dropout)
+        ff = FeedForward(dim, dropout = dropout)
+
+        layers.append(nn.ModuleList([
+            PreNorm(dim, attn),
+            PreNorm(dim, ff)
+        ]))
+
+        # execute_type = ReversibleSequence if reversible else SequentialSequence
+        execute_type = SequentialSequence
+        self.net = execute_type(layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+class LinformerEncoderLayer(nn.Module):
+    def __init__(self, dim, seq_len, k = 256, heads = 8, dropout = 0.):
+        super().__init__()
+        layers = nn.ModuleList([])
+        attn = LinformerSelfAttention(dim=dim, seq_len=seq_len, k=k, heads=heads, one_kv_head=True, share_kv=True, dropout=0)
+        # attn = MultiheadSelfAttention(dim=dim, seq_len=seq_len, k=k, heads=heads, dropout=dropout)
         ff = FeedForward(dim, dropout = dropout)
 
         layers.append(nn.ModuleList([
@@ -186,11 +257,16 @@ class EncoderLayer(nn.Module):
 
 
 if __name__ == '__main__':
-    # l = LinformerSelfAttention(16,256).cuda()
-    linformer_layer = EncoderLayer(16, 256).cuda()
+    mha_self_attention = MultiheadSelfAttention(dim=16, seq_len=256).cuda()
+    mha_layer = MHAEncoderLayer(dim=16, seq_len=256).cuda()
+    # linformer_self_attention = LinformerSelfAttention(dim=16, seq_len=256).cuda()
+    # linformer_layer = LinformerEncoderLayer(dim=16, seq_len=256).cuda()
 
     with torch.no_grad():
         torch_input = torch.rand(1, 256, 16).cuda()
 
-    out = linformer_layer(torch_input)
+    out = mha_self_attention(torch_input)
+    out = mha_layer(torch_input)
+    # out = linformer_self_attention(torch_input)
+    # out = linformer_layer(torch_input)
     print("complete!")
