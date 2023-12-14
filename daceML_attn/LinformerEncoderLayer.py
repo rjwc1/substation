@@ -2,6 +2,7 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+from daceml.torch import dace_module
 
 
 ############# GENERAL HELPER FUNCTIONS FROM LUCIDRAINS LINFORMER ######################
@@ -102,6 +103,7 @@ class SequentialSequence(nn.Module):
 
 
 ##################### LINFORMER SELF ATTENTION ####################################
+@dace_module(cuda=True, backward=False)
 class LinformerSelfAttention(nn.Module):
     def __init__(self, dim, seq_len, k = 256, heads = 8, one_kv_head = False, share_kv = False, dropout = 0.):
         super().__init__()
@@ -154,10 +156,10 @@ class LinformerSelfAttention(nn.Module):
         # merge head into batch for queries and key / values
 
         # attention
-        print("Queries:")
-        print(queries.shape)
-        print("Keys:")
-        print(keys.shape)
+        # print("Queries:")
+        # print(queries.shape)
+        # print("Keys:")
+        # print(keys.shape)
 
         queries = queries.reshape(b, n, h, -1).transpose(1, 2)
 
@@ -165,11 +167,11 @@ class LinformerSelfAttention(nn.Module):
         keys, values = map(merge_key_values, (keys, values))
 
 
-        # attention
-        print("Queries:")
-        print(queries.shape)
-        print("Keys:")
-        print(keys.shape)
+        # # attention
+        # print("Queries:")
+        # print(queries.shape)
+        # print("Keys:")
+        # print(keys.shape)
 
         # attention
 
@@ -182,6 +184,7 @@ class LinformerSelfAttention(nn.Module):
         out = out.transpose(1, 2).reshape(b, n, -1)
         return self.to_out(out)
 
+@dace_module(cuda=True, backward=False)
 class LinformerEncoderLayer(nn.Module):
     def __init__(self, dim, seq_len, k = 256, heads = 8, dropout = 0.):
         super().__init__()
@@ -215,8 +218,51 @@ if __name__ == '__main__':
     torch_attn = torch.nn.MultiheadAttention(embed_dim, num_heads).cuda()
 
     with torch.no_grad():
-        torch_input = torch.rand(1, 256, 16).cuda()
+        dace_input = torch.rand(1, 256, 16).cuda()
 
-    out = linformer_self_attention(torch_input)
-    out = linformer_layer(torch_input)
-    print("complete!")
+    # out = linformer_self_attention(dace_input)
+    # out = linformer_layer(torch_input)
+    # print("complete!")
+
+    from daceml.testing.profiling import time_funcs, print_time_statistics
+
+    def run_dace():
+        out = linformer_self_attention(dace_input)
+
+    times = time_funcs([run_dace],
+                    func_names=["dace"],
+                    warmups=5,
+                    num_iters=100)
+    print_time_statistics(times, ["dace"])
+
+    from daceml.transformation import TaskletFusion
+    from dace.transformation.dataflow import Vectorization, TrivialMapRangeElimination
+    from dace.transformation.subgraph import SubgraphFusion
+    from daceml.util import utils
+    from dace.library import change_default
+    from daceml import onnx as donnx
+
+    linformer_self_attention.reset_sdfg()
+    def expand_and_simplify(module):
+        # use the pure expansions of operators
+        with change_default(donnx, "pure"):
+            utils.auto_optimize(module.sdfg, cuda=True, simplify=True)
+
+    linformer_self_attention.append_post_onnx_hook("auto_optimize", expand_and_simplify)
+
+    # apply tasklet fusion
+    linformer_self_attention.append_post_onnx_hook("fuse_tasklets", lambda x:\
+            x.dace_model.sdfg.apply_transformations_repeated(TaskletFusion))
+    
+    # apply vectorization
+    def vectorize(fwd, bwd):
+        fwd.apply_transformations(Vectorization)
+        # bwd.apply_transformations(Vectorization)
+    
+    linformer_self_attention.append_post_autodiff_hook("vectorize", vectorize)
+
+    times = time_funcs([run_dace],
+                   func_names=["dace"],
+                   warmups=5,
+                   num_iters=100)
+    print_time_statistics(times, ["dace"])
