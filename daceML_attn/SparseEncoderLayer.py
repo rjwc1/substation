@@ -1,8 +1,8 @@
 import math
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-
 
 ############# GENERAL HELPER FUNCTIONS FROM LUCIDRAINS LINFORMER ######################
 def default(val, default_val):
@@ -100,9 +100,20 @@ class SequentialSequence(nn.Module):
             x = x + g(x, **g_args)
         return 
 
+
+##################SPARSE ATTENTION************************
+def strided_transpose(x, n_ctx, local_attn_ctx, blocksize):
+    bT_ctx = n_ctx // local_attn_ctx
+    assert bT_ctx % blocksize == 0, f'{bT_ctx}, {blocksize}'
+    n, t, embd = x.size()
+    x = torch.reshape(x, [n, bT_ctx, local_attn_ctx, embd])
+    x = torch.transpose(x, 0, 2, 1, 3)
+    x = torch.reshape(x, [n, t, embd])
+    return x
+
 ################# STANDARD MULTIHEADED SELF ATTENTION #######################
-class MultiheadSelfAttention(nn.Module):
-    def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
+class SparseSelfAttention(nn.Module):
+    def __init__(self, dim, seq_len, heads = 8, dropout = 0., blocksize=32):
         super().__init__()
 
         assert (dim % heads) == 0, 'dimension must be divisible by the number of heads'
@@ -110,6 +121,8 @@ class MultiheadSelfAttention(nn.Module):
         self.seq_len = seq_len
 
         self.heads = heads #Number of heads
+
+        self.blocksize = blocksize
 
         dim_head = dim // heads #Set the dimension of each attention head
         self.dim_head = dim_head
@@ -134,7 +147,14 @@ class MultiheadSelfAttention(nn.Module):
         kv_input = x if context is None else context #Input keys and values
 
         keys = self.to_k(kv_input) #Multiply keys by weights
-        values = self.to_v(kv_input) #Multiply values by weights 
+        values = self.to_v(kv_input) #Multiply values by weights
+
+        n_ctx = queries.size()[1]
+        local_attn_ctx = 32
+
+        queries = strided_transpose(queries, n_ctx, local_attn_ctx, self.blocksize)
+        keys = strided_transpose(keys, n_ctx, local_attn_ctx, self.blocksize)
+        values = strided_transpose(values, n_ctx, local_attn_ctx, self.blocksize)
 
         # merge head into batch for queries and key / values
 
@@ -156,11 +176,11 @@ class MultiheadSelfAttention(nn.Module):
         out = out.transpose(1, 2).reshape(b, n, -1)
         return self.to_out(out)
 
-class MHAEncoderLayer(nn.Module):
+class SparseEncoderLayer(nn.Module):
     def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
         super().__init__()
         layers = nn.ModuleList([])
-        attn = MultiheadSelfAttention(dim=dim, seq_len=seq_len, heads=heads, dropout=dropout)
+        attn = SparseSelfAttention(dim=dim, seq_len=seq_len, heads=heads, dropout=dropout)
         ff = FeedForward(dim, dropout = dropout)
 
         layers.append(nn.ModuleList([
@@ -176,13 +196,15 @@ class MHAEncoderLayer(nn.Module):
         return self.net(x)
 
 
-if __name__ == '__main__':
-    mha_self_attention = MultiheadSelfAttention(dim=16, seq_len=256).cuda()
-    mha_layer = MHAEncoderLayer(dim=16, seq_len=256).cuda()
+
+
+if __name__ == "__main__":
+    sparse_self_attention = SparseSelfAttention(dim=16, seq_len=256).cuda()
+    sparse_layer = SparseEncoderLayer(dim=16, seq_len=256).cuda()
 
     with torch.no_grad():
         torch_input = torch.rand(1, 256, 16).cuda()
 
-    out = mha_self_attention(torch_input)
-    out = mha_layer(torch_input)
+    out = sparse_self_attention(torch_input)
+    out = sparse_layer(torch_input)
     print("complete!")

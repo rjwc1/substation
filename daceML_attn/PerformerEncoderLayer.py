@@ -579,7 +579,22 @@ class Performer(nn.Module):
         return self.net(x, **kwargs)
 
 if __name__ == '__main__':
-    # linformer_self_attention = LinformerSelfAttention(dim=16, seq_len=256).cuda()
+    # queries / keys / values with heads already split and transposed to first dimension
+    # 8 heads, dimension of head is 64, sequence length of 512
+    q = torch.randn(1, 8, 512, 64).cuda()
+    k = torch.randn(1, 8, 512, 64).cuda()
+    v = torch.randn(1, 8, 512, 64).cuda()
+
+    attn_fn = FastAttention(
+        dim_heads = 64,
+        nb_features = 256,
+        causal = False
+    ).cuda()
+
+    out = attn_fn(q, k, v) # (1, 8, 512, 64)
+    # now merge heads and combine outputs with Wo
+
+
     performer_layer = Performer(dim = 512, depth = 1, heads = 8, dim_head=None, causal = False).cuda()
 
     with torch.no_grad():
