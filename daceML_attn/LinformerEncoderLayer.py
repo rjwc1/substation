@@ -153,10 +153,23 @@ class LinformerSelfAttention(nn.Module):
 
         # merge head into batch for queries and key / values
 
+        # attention
+        print("Queries:")
+        print(queries.shape)
+        print("Keys:")
+        print(keys.shape)
+
         queries = queries.reshape(b, n, h, -1).transpose(1, 2)
 
         merge_key_values = lambda t: t.reshape(b, k, -1, d_h).transpose(1, 2).expand(-1, h, -1, -1)
         keys, values = map(merge_key_values, (keys, values))
+
+
+        # attention
+        print("Queries:")
+        print(queries.shape)
+        print("Keys:")
+        print(keys.shape)
 
         # attention
 
@@ -196,6 +209,10 @@ class LinformerEncoderLayer(nn.Module):
 if __name__ == '__main__':
     linformer_self_attention = LinformerSelfAttention(dim=16, seq_len=256).cuda()
     linformer_layer = LinformerEncoderLayer(dim=16, seq_len=256).cuda()
+
+    embed_dim = 16
+    num_heads = 8
+    torch_attn = torch.nn.MultiheadAttention(embed_dim, num_heads).cuda()
 
     with torch.no_grad():
         torch_input = torch.rand(1, 256, 16).cuda()

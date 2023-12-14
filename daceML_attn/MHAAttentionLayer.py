@@ -136,18 +136,21 @@ class MultiheadSelfAttention(nn.Module):
         keys = self.to_k(kv_input) #Multiply keys by weights
         values = self.to_v(kv_input) #Multiply values by weights 
 
+        # merge head into batch for queries and key / values
+
+        queries = queries.reshape(b, n, h, -1).transpose(1, 2)
+
+        merge_key_values = lambda t: t.reshape(b, n, -1, d_h).transpose(1, 2).expand(-1, h, -1, -1)
+        keys, values = map(merge_key_values, (keys, values))
+
         # attention
-        print("Queries:")
-        print(queries.shape)
-        print("Keys:")
-        print(keys.shape)
-        #bhnd,bhkd->bhnk
-        dots = torch.einsum('bhnd,hnd->hnn', queries, keys) * (d_h ** -0.5) #Dot product the queries and keys, normalize by dimension
+        #From linformer: bhnd,bhkd->bhnk
+        dots = torch.einsum('bhnd,bhnd->bhn', queries, keys) * (d_h ** -0.5) #Dot product the queries and keys, normalize by dimension
         print("Got past this einsum!")
         attn = dots.softmax(dim=-1) #Compute softmax
         attn = self.dropout(attn) #Dropout layer
-        #bhnk,bhkd->bhnd
-        out = torch.einsum('bhd,bhn->bhnd', attn, values ) #Multiply result of attention by the values
+        #From linformer: bhnk,bhkd->bhnd
+        out = torch.einsum('bhn,bhnd->bhnd', attn, values ) #Multiply result of attention by the values
 
         # split heads
         out = out.transpose(1, 2).reshape(b, n, -1)
@@ -175,11 +178,20 @@ class MHAEncoderLayer(nn.Module):
 
 if __name__ == '__main__':
     mha_self_attention = MultiheadSelfAttention(dim=16, seq_len=256).cuda()
+    embed_dim = 16
+    num_heads = 8
+    torch_attn = torch.nn.MultiheadAttention(embed_dim, num_heads).cuda()
     mha_layer = MHAEncoderLayer(dim=16, seq_len=256).cuda()
 
     with torch.no_grad():
         torch_input = torch.rand(1, 256, 16).cuda()
 
     out = mha_self_attention(torch_input)
-    out = mha_layer(torch_input)
+    torch_out, _ = torch_attn(torch_input, torch_input, torch_input)
+    print(torch.allclose(out, torch_out))
+
+    print(out)
+    print(torch_out)
+
+    # out = mha_layer(torch_input)
     print("complete!")
