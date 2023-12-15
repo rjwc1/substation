@@ -30,3 +30,9 @@ If you want to interact with the generated sdfgs you can install the vscode exte
 
 ## Running the attention mechanisms
 Each attention mechanism implementation is in a separate file named the mechanism implemented. You can run each to profile a given attention or encoder layer. See the code for how to select which to run and how to enable DaCeML optimizations. To view the sdfg for a given attention mechanism look inside the ``.dacecache`` folder.
+
+Refer to the DaCe and DaCeML docs for more information
+
+https://spcldace.readthedocs.io/en/latest/index.html
+
+https://daceml.readthedocs.io/en/latest/index.html
