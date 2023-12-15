@@ -29,10 +29,12 @@ def get_attn_mask(n, attn_mode, local_attn_ctx=None):
 
 def strided_transpose(x, n_ctx, local_attn_ctx, blocksize):
     bT_ctx = n_ctx // local_attn_ctx
-    assert bT_ctx % blocksize == 0, f'{bT_ctx}, {blocksize}'
+    # assert bT_ctx % blocksize == 0, f'{bT_ctx}, {blocksize}'
     n, t, embd = x.size()
     x = torch.reshape(x, [n, bT_ctx, local_attn_ctx, embd])
-    x = torch.transpose(x, 0, 2, 1, 3)
+    # x = torch.transpose(x, 0, 2, 1, 3)
+    x = torch.transpose(x, 0, 2)
+    x = torch.transpose(x, 1, 3)
     x = torch.reshape(x, [n, t, embd])
     return x
 
@@ -49,9 +51,6 @@ def split_states(x, n):
     x_shape = x.size()
     m = x_shape[-1]
     new_x_shape = x_shape[:-1] + [n, m // n]
-    return torch.reshape(x, new_x_shape)
-
-
     return torch.reshape(x, new_x_shape)
 
 def merge_states(x):
@@ -92,11 +91,13 @@ def blocksparse_attention_impl(q, k, v, heads, attn_mode, local_attn_ctx=None, b
         n, t, embd = a.size()
         bT_ctx = n_ctx // local_attn_ctx
         a = torch.reshape(a, [n, local_attn_ctx, bT_ctx, embd])
-        a = torch.transpose(a, 0, 2, 1, 3)
+        # a = torch.transpose(a, 0, 2, 1, 3)
+        a = torch.transpose(a, 0, 2)
+        a = torch.transpose(a, 1, 3)
         a = torch.reshape(a, [n, t, embd])
     return a
 
-@dace_module(cuda=True, backward=False, auto_optimize=True)
+@dace_module(cuda=True, backward=False, auto_optimize=True, simplify=True)
 class SparseAttention(nn.Module):
     def __init__(self, heads, attn_mode, local_attn_ctx=None, blocksize=32):
         # super(SparseAttention, self).__init__()
@@ -112,11 +113,11 @@ class SparseAttention(nn.Module):
 
 # Example usage:
 if __name__ == "__main__":
-    n_batch = 4
-    n_ctx = 1024
+    n_batch = 1
+    n_ctx = 256
     n_embd = 256
-    heads = 4
-    attn_mode = "all"
+    heads = 8
+    attn_mode = "strided"
     local_attn_ctx = 32
     blocksize = 32
 
@@ -125,13 +126,12 @@ if __name__ == "__main__":
     v = torch.randn(n_batch, n_ctx, n_embd).cuda()
 
     model = SparseAttention(heads, attn_mode, local_attn_ctx, blocksize).cuda()
-    output = model(q, k, v)
+    # output = model(q, k, v)
     # print(output[0])
 
     from daceml.testing.profiling import time_funcs, print_time_statistics
 
     def run_dace():
-        # out = linformer_self_attention(dace_input)
         out = model(q, k, v)
 
     times = time_funcs([run_dace],
@@ -143,6 +143,7 @@ if __name__ == "__main__":
     from daceml.transformation import TaskletFusion
     from dace.transformation.dataflow import Vectorization, TrivialMapRangeElimination
     from dace.transformation.subgraph import SubgraphFusion
+    from dace.transformation.dataflow import MapReduceFusion
     from daceml.util import utils
     from dace.library import change_default
     from daceml import onnx as donnx
@@ -156,15 +157,21 @@ if __name__ == "__main__":
     model.append_post_onnx_hook("auto_optimize", expand_and_simplify)
 
     # apply tasklet fusion
-    model.append_post_onnx_hook("fuse_tasklets", lambda x:\
-            x.dace_model.sdfg.apply_transformations_repeated(TaskletFusion))
+    # model.append_post_onnx_hook("fuse_tasklets", lambda x:\
+    #         x.dace_model.sdfg.apply_transformations_repeated(TaskletFusion))
+
+    # model.append_post_onnx_hook("gpu_transformation", lambda x:\
+    #         x.dace_model.sdfg.apply_gpu_transformations())
+
+    # model.append_post_onnx_hook("map_fusion", lambda x:\
+    #         x.dace_model.sdfg.apply_transformations(MapReduceFusion))
     
     # apply vectorization
     def vectorize(fwd, bwd):
         fwd.apply_transformations(Vectorization)
         # bwd.apply_transformations(Vectorization)
     
-    model.append_post_autodiff_hook("vectorize", vectorize)
+    # model.append_post_autodiff_hook("vectorize", vectorize)
 
     times = time_funcs([run_dace],
                    func_names=["dace"],

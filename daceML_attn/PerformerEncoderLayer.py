@@ -12,9 +12,12 @@ from local_attention import LocalAttention
 from axial_positional_embedding import AxialPositionalEmbedding
 from performer_pytorch.reversible import ReversibleSequence, SequentialSequence
 
-from distutils.version import LooseVersion
+# from distutils.version import LooseVersion
 
-TORCH_GE_1_8_0 = LooseVersion(torch.__version__) >= LooseVersion('1.8.0')
+from daceml.torch import dace_module
+
+# TORCH_GE_1_8_0 = LooseVersion(torch.__version__) >= LooseVersion('1.8.0')
+TORCH_GE_1_8_0 = True
 
 try:
     from apex import amp
@@ -105,12 +108,17 @@ def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, ep
     diag_data = diag_data.unsqueeze(dim=-1)
 
     if is_query:
+        # data_dash = ratio * (
+        #     torch.exp(data_dash - diag_data -
+        #             torch.amax(data_dash, dim=-1, keepdim=True).detach()) + eps)
         data_dash = ratio * (
             torch.exp(data_dash - diag_data -
-                    torch.amax(data_dash, dim=-1, keepdim=True).detach()) + eps)
+                    torch.max(data_dash, dim=-1, keepdim=True)[0]) + eps)
     else:
+        # data_dash = ratio * (
+        #     torch.exp(data_dash - diag_data - torch.amax(data_dash, dim=(-1, -2), keepdim=True).detach()) + eps)
         data_dash = ratio * (
-            torch.exp(data_dash - diag_data - torch.amax(data_dash, dim=(-1, -2), keepdim=True).detach()) + eps)
+            torch.exp(data_dash - diag_data - torch.max(data_dash)) + eps)
 
     return data_dash.type_as(data)
 
@@ -218,6 +226,7 @@ def causal_linear_attention_noncuda(q, k, v, chunk_size = 128, eps = 1e-6):
 
     return torch.cat(outs, dim = -2)
 
+# @dace_module(cuda=True, backward=False, auto_optimize=False, simplify=True)
 class FastAttention(nn.Module):
     def __init__(self, dim_heads, nb_features = None, ortho_scaling = 0, causal = False, generalized_attention = False, kernel_fn = nn.ReLU(), no_projection = False):
         super().__init__()
@@ -239,37 +248,37 @@ class FastAttention(nn.Module):
         self.no_projection = no_projection
 
         self.causal = causal
-        if causal:
-            try:
-                import fast_transformers.causal_product.causal_product_cuda
-                self.causal_linear_fn = partial(causal_linear_attention)
-            except ImportError:
-                print('unable to import cuda code for auto-regressive Performer. will default to the memory inefficient non-cuda version')
-                self.causal_linear_fn = causal_linear_attention_noncuda
+    #     if causal:
+    #         try:
+    #             import fast_transformers.causal_product.causal_product_cuda
+    #             self.causal_linear_fn = partial(causal_linear_attention)
+    #         except ImportError:
+    #             print('unable to import cuda code for auto-regressive Performer. will default to the memory inefficient non-cuda version')
+    #             self.causal_linear_fn = causal_linear_attention_noncuda
 
-    @torch.no_grad()
-    def redraw_projection_matrix(self, device):
-        projections = self.create_projection(device = device)
-        self.projection_matrix.copy_(projections)
-        del projections
+    # @torch.no_grad()
+    # def redraw_projection_matrix(self, device):
+    #     projections = self.create_projection(device = device)
+    #     self.projection_matrix.copy_(projections)
+    #     del projections
 
     def forward(self, q, k, v):
         device = q.device
 
-        if self.no_projection:
-            q = q.softmax(dim = -1)
-            k = torch.exp(k) if self.causal else k.softmax(dim = -2)
+        # if self.no_projection:
+        #     q = q.softmax(dim = -1)
+        #     k = torch.exp(k) if self.causal else k.softmax(dim = -2)
 
-        elif self.generalized_attention:
-            create_kernel = partial(generalized_kernel, kernel_fn = self.kernel_fn, projection_matrix = self.projection_matrix, device = device)
-            q, k = map(create_kernel, (q, k))
+        # elif self.generalized_attention:
+        #     create_kernel = partial(generalized_kernel, kernel_fn = self.kernel_fn, projection_matrix = self.projection_matrix, device = device)
+        #     q, k = map(create_kernel, (q, k))
 
-        else:
-            create_kernel = partial(softmax_kernel, projection_matrix = self.projection_matrix, device = device)
-            q = create_kernel(q, is_query = True)
-            k = create_kernel(k, is_query = False)
+        # else:
+        create_kernel = partial(softmax_kernel, projection_matrix = self.projection_matrix, device = device)
+        q = create_kernel(q, is_query = True)
+        k = create_kernel(k, is_query = False)
 
-        attn_fn = linear_attention if not self.causal else self.causal_linear_fn
+        attn_fn = linear_attention #if not self.causal else self.causal_linear_fn
         out = attn_fn(q, k, v)
         return out
 
@@ -494,7 +503,7 @@ class FixedPositionalEmbedding(nn.Module):
         return self.emb[None, :x.shape[1], :].to(x)
 
 # performer
-
+# @dace_module(cuda=True, backward=False, auto_optimize=True, simplify=False)
 class Performer(nn.Module):
     def __init__(
         self,
@@ -581,25 +590,68 @@ class Performer(nn.Module):
 if __name__ == '__main__':
     # queries / keys / values with heads already split and transposed to first dimension
     # 8 heads, dimension of head is 64, sequence length of 512
-    q = torch.randn(1, 8, 512, 64).cuda()
-    k = torch.randn(1, 8, 512, 64).cuda()
-    v = torch.randn(1, 8, 512, 64).cuda()
+    seq = 256
+    # q = torch.randn(1, 8, seq, 256).cuda()
+    # k = torch.randn(1, 8, seq, 256).cuda()
+    # v = torch.randn(1, 8, seq, 256).cuda()
 
-    attn_fn = FastAttention(
-        dim_heads = 64,
-        nb_features = 256,
-        causal = False
-    ).cuda()
+    # attn_fn = FastAttention(
+    #     dim_heads = 256,
+    #     nb_features = 256,
+    #     causal = False
+    # ).cuda()
 
-    out = attn_fn(q, k, v) # (1, 8, 512, 64)
+    # out = attn_fn(q, k, v) # (1, 8, 512, 64)
     # now merge heads and combine outputs with Wo
 
-
-    performer_layer = Performer(dim = 512, depth = 1, heads = 8, dim_head=None, causal = False).cuda()
+    performer_layer = Performer(dim = 256, depth = 1, heads = 8, dim_head=None, causal = False).cuda()
 
     with torch.no_grad():
-        x = torch.randn(1, 2048, 512).cuda()
+        x = torch.randn(1, 256, 256).cuda()
 
-    out = performer_layer(x) # (1, 2048, 512)
+    # out = performer_layer(x)
+    # print("complete!")
 
-    print("complete!")
+    from daceml.testing.profiling import time_funcs, print_time_statistics
+
+    def run_dace():
+        out = performer_layer(x)
+        # out = attn_fn(q,k,v)
+
+    times = time_funcs([run_dace],
+                    func_names=["dace"],
+                    warmups=5,
+                    num_iters=100)
+    print_time_statistics(times, ["dace"])
+
+    from daceml.transformation import TaskletFusion
+    from dace.transformation.dataflow import Vectorization, TrivialMapRangeElimination
+    from dace.transformation.subgraph import SubgraphFusion
+    from daceml.util import utils
+    from dace.library import change_default
+    from daceml import onnx as donnx
+
+    performer_layer.reset_sdfg()
+    def expand_and_simplify(module):
+        # use the pure expansions of operators
+        with change_default(donnx, "pure"):
+            utils.auto_optimize(module.sdfg, cuda=True, simplify=True)
+
+    performer_layer.append_post_onnx_hook("auto_optimize", expand_and_simplify)
+
+    # apply tasklet fusion
+    # performer_layer.append_post_onnx_hook("fuse_tasklets", lambda x:\
+    #         x.dace_model.sdfg.apply_transformations_repeated(TaskletFusion))
+    
+    # apply vectorization
+    def vectorize(fwd, bwd):
+        fwd.apply_transformations(Vectorization)
+        # bwd.apply_transformations(Vectorization)
+    
+    # performer_layer.append_post_autodiff_hook("vectorize", vectorize)
+
+    times = time_funcs([run_dace],
+                   func_names=["dace"],
+                   warmups=5,
+                   num_iters=100)
+    print_time_statistics(times, ["dace"])

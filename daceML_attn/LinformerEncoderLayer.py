@@ -81,6 +81,7 @@ class GELU_(nn.Module):
 
 GELU = nn.GELU if hasattr(nn, 'GELU') else GELU_
 
+# @dace_module(cuda=True, backward=False)
 class SequentialSequence(nn.Module):
     def __init__(self, layers, args_route = {}, layer_dropout = 0.):
         super().__init__()
@@ -99,11 +100,11 @@ class SequentialSequence(nn.Module):
         for (f, g), (f_args, g_args) in layers_and_args:
             x = x + f(x, **f_args)
             x = x + g(x, **g_args)
-        return 
+        return x
 
 
 ##################### LINFORMER SELF ATTENTION ####################################
-@dace_module(cuda=True, backward=False)
+@dace_module(cuda=True, backward=False, auto_optimize=False)
 class LinformerSelfAttention(nn.Module):
     def __init__(self, dim, seq_len, k = 256, heads = 8, one_kv_head = False, share_kv = False, dropout = 0.):
         super().__init__()
@@ -136,7 +137,7 @@ class LinformerSelfAttention(nn.Module):
         b, n, d, d_h, h, k = *x.shape, self.dim_head, self.heads, self.k
 
         kv_len = n if context is None else context.shape[1] #Keys and values must be the same length as input
-        assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
+        # assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
 
         queries = self.to_q(x) #Multiply queries by weights
 
@@ -184,7 +185,7 @@ class LinformerSelfAttention(nn.Module):
         out = out.transpose(1, 2).reshape(b, n, -1)
         return self.to_out(out)
 
-@dace_module(cuda=True, backward=False)
+# @dace_module(cuda=True, backward=False, auto_optimize=True)
 class LinformerEncoderLayer(nn.Module):
     def __init__(self, dim, seq_len, k = 256, heads = 8, dropout = 0.):
         super().__init__()
@@ -210,24 +211,21 @@ class LinformerEncoderLayer(nn.Module):
 
 
 if __name__ == '__main__':
-    linformer_self_attention = LinformerSelfAttention(dim=16, seq_len=256).cuda()
-    linformer_layer = LinformerEncoderLayer(dim=16, seq_len=256).cuda()
-
-    embed_dim = 16
-    num_heads = 8
-    torch_attn = torch.nn.MultiheadAttention(embed_dim, num_heads).cuda()
+    linformer_self_attention = LinformerSelfAttention(dim=256, seq_len=256).cuda()
+    # linformer_layer = LinformerEncoderLayer(dim=256, seq_len=4096).cuda()
 
     with torch.no_grad():
-        dace_input = torch.rand(1, 256, 16).cuda()
+        dace_input = torch.rand(1, 256, 256).cuda()
 
     # out = linformer_self_attention(dace_input)
-    # out = linformer_layer(torch_input)
+    # out = linformer_layer(dace_input)
     # print("complete!")
 
     from daceml.testing.profiling import time_funcs, print_time_statistics
 
     def run_dace():
         out = linformer_self_attention(dace_input)
+        # out = linformer_layer(dace_input)
 
     times = time_funcs([run_dace],
                     func_names=["dace"],
@@ -243,6 +241,7 @@ if __name__ == '__main__':
     from daceml import onnx as donnx
 
     linformer_self_attention.reset_sdfg()
+
     def expand_and_simplify(module):
         # use the pure expansions of operators
         with change_default(donnx, "pure"):
@@ -257,7 +256,6 @@ if __name__ == '__main__':
     # apply vectorization
     def vectorize(fwd, bwd):
         fwd.apply_transformations(Vectorization)
-        # bwd.apply_transformations(Vectorization)
     
     linformer_self_attention.append_post_autodiff_hook("vectorize", vectorize)
 

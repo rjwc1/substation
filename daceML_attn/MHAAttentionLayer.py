@@ -2,6 +2,7 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+from daceml.torch import dace_module
 
 
 ############# GENERAL HELPER FUNCTIONS FROM LUCIDRAINS LINFORMER ######################
@@ -101,6 +102,7 @@ class SequentialSequence(nn.Module):
         return 
 
 ################# STANDARD MULTIHEADED SELF ATTENTION #######################
+@dace_module(cuda=True, backward=False, auto_optimize=False)
 class MultiheadSelfAttention(nn.Module):
     def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
         super().__init__()
@@ -127,7 +129,7 @@ class MultiheadSelfAttention(nn.Module):
         b, n, d, d_h, h = *x.shape, self.dim_head, self.heads
 
         kv_len = n if context is None else context.shape[1] #Keys and values must be the same length as input
-        assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
+        # assert kv_len == self.seq_len, f'the sequence length of the key / values must be {self.seq_len} - {kv_len} given'
 
         queries = self.to_q(x) #Multiply queries by weights
 
@@ -146,7 +148,7 @@ class MultiheadSelfAttention(nn.Module):
         # attention
         #From linformer: bhnd,bhkd->bhnk
         dots = torch.einsum('bhnd,bhnd->bhn', queries, keys) * (d_h ** -0.5) #Dot product the queries and keys, normalize by dimension
-        print("Got past this einsum!")
+        # print("Got past this einsum!")
         attn = dots.softmax(dim=-1) #Compute softmax
         attn = self.dropout(attn) #Dropout layer
         #From linformer: bhnk,bhkd->bhnd
@@ -156,6 +158,7 @@ class MultiheadSelfAttention(nn.Module):
         out = out.transpose(1, 2).reshape(b, n, -1)
         return self.to_out(out)
 
+# @dace_module(cuda=True, backward=False, auto_optimize=False)
 class MHAEncoderLayer(nn.Module):
     def __init__(self, dim, seq_len, heads = 8, dropout = 0.):
         super().__init__()
@@ -177,12 +180,57 @@ class MHAEncoderLayer(nn.Module):
 
 
 if __name__ == '__main__':
-    mha_self_attention = MultiheadSelfAttention(dim=16, seq_len=256).cuda()
-    mha_layer = MHAEncoderLayer(dim=16, seq_len=256).cuda()
+    mha_self_attention = MultiheadSelfAttention(dim=256, seq_len=256).cuda()
+    # mha_layer = MHAEncoderLayer(dim=16, seq_len=256).cuda()
 
     with torch.no_grad():
-        torch_input = torch.rand(1, 256, 16).cuda()
+        torch_input = torch.rand(1, 256, 256).cuda()
 
-    out = mha_self_attention(torch_input)
-    out = mha_layer(torch_input)
-    print("complete!")
+    # out = mha_self_attention(torch_input)
+    # out = mha_layer(torch_input)
+    # print("complete!")
+
+    from daceml.testing.profiling import time_funcs, print_time_statistics
+
+    def run_dace():
+        # out = MHAEncoderLayer(dace_input)
+        out = mha_self_attention(torch_input)
+
+    times = time_funcs([run_dace],
+                    func_names=["dace"],
+                    warmups=5,
+                    num_iters=100)
+    print_time_statistics(times, ["dace"])
+
+    from daceml.transformation import TaskletFusion
+    from dace.transformation.dataflow import Vectorization, TrivialMapRangeElimination
+    from dace.transformation.subgraph import SubgraphFusion
+    from dace.transformation.auto.auto_optimize import auto_optimize
+    from daceml.util import utils
+    from dace.library import change_default
+    from daceml import onnx as donnx
+
+    mha_self_attention.reset_sdfg()
+    def expand_and_simplify(module):
+        # use the pure expansions of operators
+        with change_default(donnx, "pure"):
+            utils.auto_optimize(module.sdfg, cuda=True, simplify=False)
+
+    mha_self_attention.append_post_onnx_hook("auto_optimize", expand_and_simplify)
+
+    # apply tasklet fusion
+    mha_self_attention.append_post_onnx_hook("fuse_tasklets", lambda x:\
+            x.dace_model.sdfg.apply_transformations_repeated(TaskletFusion))
+    
+    # apply vectorization
+    def vectorize(fwd, bwd):
+        fwd.apply_transformations(Vectorization)
+        # bwd.apply_transformations(Vectorization)
+    
+    mha_self_attention.append_post_autodiff_hook("vectorize", vectorize)
+
+    times = time_funcs([run_dace],
+                   func_names=["dace"],
+                   warmups=5,
+                   num_iters=100)
+    print_time_statistics(times, ["dace"])
